@@ -25,6 +25,64 @@ Function hostAlarms($cluster){
     Invoke-item "c:\temp\ESX-Host-Red-Alarms.csv"
 }
 
+function GetSnapshotAge {
+    
+    param($Created)
+
+    [string]$output = "";
+
+    $age = New-TimeSpan -Start $Created -end (Get-Date)
+    
+    if($age.Days -gt 0){$output += "$([string]$age.Days) days "}
+
+    $output += "$([string]$age.Hours) hours"
+
+    return $output
+}
+
+function GetSnapshotCreator{
+
+    param($vmname,$snapcreated)
+
+    $taskmanager            = Get-View TaskManager
+
+    $moref                  = (Get-VM $vmname | Get-View).MoRef
+
+    $fspec                  = New-Object VMware.Vim.TaskFilterSpec
+
+    $fspec.entity           = New-Object VMware.Vim.TaskFilterSpecByEntity
+    $fspec.entity.entity    = $moref
+
+    $fspec.time             = New-Object VMware.Vim.TaskFilterSpecByTime
+    $fspec.time.timeType    = "startedTime"
+    $fspec.time.beginTime   = ($snapcreated).AddSeconds(-30)
+    $fspec.time.endTime     = ($snapcreated).AddSeconds(30)
+
+    $collectorref           = $taskmanager.CreateCollectorForTasks($fspec)
+
+    $collector              = Get-View -Id $collectorref
+
+    $collector.RewindCollector();
+
+    $snapshotcreator        = ""
+
+    while($true){
+        $tasks = $collector.ReadNextTasks(10)
+        if($tasks.length -eq 0){break}
+        foreach($task in $tasks){
+            if($task.DescriptionId -eq "VirtualMachine.createSnapshot" -and $task.State -eq "success"){
+                $snapshotcreator = $task.Reason.UserName
+                break
+            }
+        }
+    }
+
+    $collector.DestroyCollector();
+
+    return $snapshotcreator
+
+}
+
 ##############################################################################
 #                  Add Snapins Required to Run the Scripts
 ############################################################################## 
@@ -305,6 +363,36 @@ forEach ($singObj in $vcObjArr){
         Add-Content $ReportFile "<br><br>"                
         Remove-Item $OutputPath\$cluster'HostConnectivity'.html        
     }
+
+
+
+    $snapshots = Get-VM | Get-Snapshot | Select VM, Name, Description, Created, SizeGB
+
+    if ($snapshots -ne $null){
+        for($i=0; $i -lt $($snapshots.count); $i++){
+            $snapshots[$i] | Add-Member -MemberType NoteProperty -Name snapshot_creator -value $(GetSnapshotCreator $snapshots[$i].VM.Name $snapshots[$i].Created)
+            $snapshots[$i] | Add-Member -MemberType NoteProperty -Name snapshot_age -value $(GetSnapshotAge $snapshots[$i].Created)
+        } 
+    
+        $snapshots | % {
+            New-Object -TypeName PSObject -Property @{
+                SnapName                = $_.Name
+                SnapVM                  = $_.VM
+                SnapDescription         = $_.Description
+                SnapShotAge             = $_.snapshot_age
+                SnapShotSize            = $_.SizeGB
+                SnapShotCreator         = $_.snapshot_creator
+            } | Select SnapName,SnapVM,SnapDescription,SnapShotAge,SnapShotSize,SnapShotCreator
+        } | Sort-Object -Property SnapShotSize | ConvertTo-Html -Fragment | Out-File $Outputpath\$vcFQDN'SnapInfo'.html
+    
+        Add-Content $ReportFile "<H2>$vcFQDN Snapshot Information</H2>"
+        Get-Content $Outputpath\$vcFQDN'SnapInfo'.html | Add-Content $ReportFile
+        Remove-Item $Outputpath\$vcFQDN'SnapInfo'.html
+    
+    
+    }
+    
+  
   
 ###############################################################################################
 #			                     Get Host Information
